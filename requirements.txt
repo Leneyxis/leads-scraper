@@ -1,0 +1,5 @@
+selenium
+praw
+python-dotenv
+fastapi
+uvicorn[standard]

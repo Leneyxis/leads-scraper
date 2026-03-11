@@ -1,0 +1,23 @@
+# Render Blueprint - Deploy via Dashboard or: render deploy
+services:
+  - type: web
+    name: scraper-api
+    runtime: docker  # Use Docker for Chrome/Selenium (LinkedIn) support
+    plan: free
+
+    # Env vars - add secrets in Render Dashboard
+    envVars:
+      - key: REDDIT_CLIENT_ID
+        sync: false
+      - key: REDDIT_CLIENT_SECRET
+        sync: false
+      - key: REDDIT_USERNAME
+        sync: false
+      - key: REDDIT_PASSWORD
+        sync: false
+      - key: LINKEDIN_EMAIL
+        sync: false
+      - key: LINKEDIN_PASSWORD
+        sync: false
+      - key: LINKEDIN_HEADLESS
+        value: "true"

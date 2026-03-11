@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scraper Test — Reddit & LinkedIn</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-hover: #79b8ff;
+      --success: #3fb950;
+      --error: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Outfit', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+    header {
+      margin-bottom: 2rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-top: 0.25rem;
+    }
+    .form-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .form-row {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      align-items: flex-end;
+    }
+    .field {
+      flex: 1;
+      min-width: 180px;
+    }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    input {
+      width: 100%;
+      padding: 0.6rem 0.85rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.95rem;
+    }
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    input::placeholder { color: var(--muted); }
+    select {
+      width: 100%;
+      padding: 0.6rem 0.85rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    .btn {
+      padding: 0.6rem 1.25rem;
+      font-family: inherit;
+      font-size: 0.95rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.05s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: var(--bg);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .btn-primary:active:not(:disabled) { transform: scale(0.98); }
+    .btn-primary .btn-spinner {
+      display: inline-block;
+      width: 1em;
+      height: 1em;
+      margin-right: 0.5em;
+      vertical-align: -0.15em;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .status {
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+    }
+    .status.loading {
+      background: rgba(88, 166, 255, 0.15);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .loader {
+      width: 20px;
+      height: 20px;
+      border: 2px solid rgba(88, 166, 255, 0.3);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .loader.done {
+      border: none;
+      width: 20px;
+      height: 20px;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%233fb950'%3E%3Cpath d='M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") no-repeat center;
+      animation: none;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .status.error {
+      background: rgba(248, 81, 73, 0.15);
+      border: 1px solid rgba(248, 81, 73, 0.3);
+      color: var(--error);
+    }
+    .status.success {
+      background: rgba(63, 185, 80, 0.15);
+      border: 1px solid rgba(63, 185, 80, 0.3);
+      color: var(--success);
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    .results-count {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    .post-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      transition: border-color 0.15s;
+    }
+    .post-card:hover {
+      border-color: var(--accent);
+    }
+    .post-meta {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+      font-size: 0.85rem;
+    }
+    .post-username {
+      color: var(--accent);
+      font-weight: 500;
+    }
+    .post-platform {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      background: var(--border);
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .post-url {
+      color: var(--muted);
+      text-decoration: none;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+    }
+    .post-url:hover { color: var(--accent); }
+    .post-content {
+      font-size: 0.9rem;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .empty-state {
+      text-align: center;
+      padding: 3rem 2rem;
+      color: var(--muted);
+    }
+    .empty-state svg {
+      width: 48px;
+      height: 48px;
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Reddit & LinkedIn Scraper</h1>
+      <p class="subtitle">Test scrapers with custom keywords, quantity, and time filter</p>
+    </header>
+
+    <div class="form-card">
+      <form id="scrape-form">
+        <div class="form-row">
+          <div class="field" style="max-width: 140px;">
+            <label for="platform">Platform</label>
+            <select id="platform" name="platform">
+              <option value="reddit">Reddit</option>
+              <option value="linkedin">LinkedIn</option>
+            </select>
+          </div>
+          <div class="field" style="flex: 2; min-width: 220px;">
+            <label for="keywords">Keywords (comma-separated)</label>
+            <input type="text" id="keywords" name="keywords" placeholder="e.g. web developer, designer, copywriter" required>
+          </div>
+          <div class="field" style="max-width: 100px;">
+            <label for="quantity">Quantity</label>
+            <input type="number" id="quantity" name="quantity" value="20" min="1">
+          </div>
+          <div class="field" style="max-width: 140px;" id="time-field">
+            <label for="time-filter">Time</label>
+            <select id="time-filter" name="time_filter">
+              <option value="hour">Hour</option>
+              <option value="day" selected>Day</option>
+              <option value="week">Week</option>
+              <option value="month">Month</option>
+              <option value="year">Year</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+          <div class="field" style="flex: 0;">
+            <label>&nbsp;</label>
+            <button type="submit" class="btn btn-primary" id="submit-btn"><span class="btn-spinner" style="display:none;"></span><span class="btn-text">Scrape</span></button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <div id="status" class="status" style="display: none;"></div>
+
+    <div id="results-section" style="display: none;">
+      <div class="results-header">
+        <h2 style="font-size: 1.1rem;">Results</h2>
+        <span class="results-count" id="results-count"></span>
+      </div>
+      <div id="results-list"></div>
+    </div>
+
+    <div id="empty-state" class="empty-state">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+      </svg>
+      <p>Select a platform, enter keywords, and click Scrape</p>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('scrape-form');
+    const statusEl = document.getElementById('status');
+    const resultsSection = document.getElementById('results-section');
+    const resultsList = document.getElementById('results-list');
+    const resultsCount = document.getElementById('results-count');
+    const emptyState = document.getElementById('empty-state');
+    const submitBtn = document.getElementById('submit-btn');
+    const platformEl = document.getElementById('platform');
+    const timeFilterEl = document.getElementById('time-filter');
+
+    const REDDIT_OPTIONS = [
+      { value: 'hour', label: 'Hour' },
+      { value: 'day', label: 'Day' },
+      { value: 'week', label: 'Week' },
+      { value: 'month', label: 'Month' },
+      { value: 'year', label: 'Year' },
+      { value: 'all', label: 'All' },
+    ];
+    const LINKEDIN_OPTIONS = [
+      { value: '24', label: 'Past 24h' },
+      { value: '168', label: 'Past week' },
+      { value: '720', label: 'Past month' },
+    ];
+
+    function updateTimeFilterOptions() {
+      const isLinkedIn = platformEl.value === 'linkedin';
+      const options = isLinkedIn ? LINKEDIN_OPTIONS : REDDIT_OPTIONS;
+      timeFilterEl.innerHTML = options.map(o =>
+        `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`
+      ).join('');
+    }
+    platformEl.addEventListener('change', updateTimeFilterOptions);
+
+    function showStatus(msg, type, showLoader = false) {
+      statusEl.className = 'status ' + type;
+      statusEl.style.display = 'block';
+      statusEl.innerHTML = showLoader
+        ? `<span class="loader"></span><span>${escapeHtml(msg)}</span>`
+        : escapeHtml(msg);
+    }
+
+    function hideStatus() {
+      statusEl.style.display = 'none';
+    }
+
+    function renderPost(post) {
+      const content = (post.post_content || '').slice(0, 500);
+      const truncated = (post.post_content || '').length > 500 ? '...' : '';
+      const platform = post.platform || 'reddit';
+      return `
+        <article class="post-card">
+          <div class="post-meta">
+            <span class="post-platform">${escapeHtml(platform)}</span>
+            <span class="post-username">${escapeHtml(post.username || 'unknown')}</span>
+            <a href="${escapeHtml(post.post_url || '#')}" target="_blank" rel="noopener" class="post-url">${escapeHtml((post.post_url || '').replace('https://', ''))}</a>
+          </div>
+          <div class="post-content">${escapeHtml(content)}${truncated}</div>
+        </article>
+      `;
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const platform = platformEl.value || 'reddit';
+      const keywords = document.getElementById('keywords').value
+        .split(',')
+        .map(k => k.trim())
+        .filter(Boolean);
+      const quantity = parseInt(document.getElementById('quantity').value, 10) || 20;
+      const timeFilter = timeFilterEl.value || 'day';
+
+      if (!keywords.length) {
+        showStatus('Please enter at least one keyword.', 'error');
+        return;
+      }
+
+      const body = { platform, keywords, quantity };
+      if (platform === 'linkedin') {
+        body.since_hours = parseInt(timeFilter, 10) || 24;
+      } else {
+        body.time_filter = timeFilter;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.querySelector('.btn-spinner').style.display = 'inline-block';
+      submitBtn.querySelector('.btn-text').textContent = 'Scraping…';
+      showStatus(`Scraping ${platform === 'linkedin' ? 'LinkedIn' : 'Reddit'}… This may take a minute.`, 'loading', true);
+      resultsSection.style.display = 'none';
+      emptyState.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/scrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+
+        if (data.error) {
+          showStatus('Error: ' + data.error, 'error');
+        } else {
+          showStatus('Done! Found ' + data.count + ' post' + (data.count !== 1 ? 's' : '') + '.', 'success', true);
+          const loader = statusEl.querySelector('.loader');
+          if (loader) loader.classList.add('done');
+          setTimeout(hideStatus, 3000);
+          resultsCount.textContent = `${data.count} post${data.count !== 1 ? 's' : ''} found`;
+          resultsList.innerHTML = data.posts.length
+            ? data.posts.map(renderPost).join('')
+            : '<p class="empty-state">No posts found. Try different keywords or a broader time filter.</p>';
+          resultsSection.style.display = 'block';
+          emptyState.style.display = 'none';
+        }
+      } catch (err) {
+        showStatus('Request failed: ' + err.message, 'error');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.querySelector('.btn-spinner').style.display = 'none';
+        submitBtn.querySelector('.btn-text').textContent = 'Scrape';
+      }
+    });
+  </script>
+</body>
+</html>

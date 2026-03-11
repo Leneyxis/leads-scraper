@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+chrome_profile/
+.linkedin_browser/
+*.log
+.venv/
+venv/
+env/

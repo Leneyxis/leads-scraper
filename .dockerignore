@@ -1,0 +1,13 @@
+# Don't copy into Docker image
+.env
+.git
+.gitignore
+__pycache__
+*.pyc
+chrome_profile
+.linkedin_browser
+*.log
+.venv
+venv
+env
+node_modules
