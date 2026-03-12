@@ -3,3 +3,4 @@ praw
 python-dotenv
 fastapi
 uvicorn[standard]
+openpyxl

@@ -258,6 +258,7 @@
             <select id="platform" name="platform">
               <option value="reddit">Reddit</option>
               <option value="linkedin">LinkedIn</option>
+              <option value="both">Both</option>
             </select>
           </div>
           <div class="field" style="flex: 2; min-width: 220px;">
@@ -292,7 +293,10 @@
     <div id="results-section" style="display: none;">
       <div class="results-header">
         <h2 style="font-size: 1.1rem;">Results</h2>
-        <span class="results-count" id="results-count"></span>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <span class="results-count" id="results-count"></span>
+          <button type="button" class="btn btn-primary" id="export-excel-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem;">Export Excel</button>
+        </div>
       </div>
       <div id="results-list"></div>
     </div>
@@ -315,6 +319,7 @@
     const submitBtn = document.getElementById('submit-btn');
     const platformEl = document.getElementById('platform');
     const timeFilterEl = document.getElementById('time-filter');
+    let lastScrapedPosts = [];
 
     const REDDIT_OPTIONS = [
       { value: 'hour', label: 'Hour' },
@@ -331,7 +336,8 @@
     ];
 
     function updateTimeFilterOptions() {
-      const isLinkedIn = platformEl.value === 'linkedin';
+      const platform = platformEl.value;
+      const isLinkedIn = platform === 'linkedin';
       const options = isLinkedIn ? LINKEDIN_OPTIONS : REDDIT_OPTIONS;
       timeFilterEl.innerHTML = options.map(o =>
         `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`
@@ -373,6 +379,27 @@
       return div.innerHTML;
     }
 
+    document.getElementById('export-excel-btn').addEventListener('click', async () => {
+      if (!lastScrapedPosts.length) return;
+      try {
+        const res = await fetch('/api/export-excel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ posts: lastScrapedPosts }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `scraped_${new Date().toISOString().slice(0,19).replace(/[-:T]/g,'')}.xlsx`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        showStatus('Export failed: ' + err.message, 'error');
+      }
+    });
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const platform = platformEl.value || 'reddit';
@@ -391,14 +418,19 @@
       const body = { platform, keywords, quantity };
       if (platform === 'linkedin') {
         body.since_hours = parseInt(timeFilter, 10) || 24;
+      } else if (platform === 'reddit') {
+        body.time_filter = timeFilter;
       } else {
         body.time_filter = timeFilter;
+        const sinceMap = { hour: 1, day: 24, week: 168, month: 720, year: 8760, all: 8760 };
+        body.since_hours = sinceMap[timeFilter] || 24;
       }
 
       submitBtn.disabled = true;
       submitBtn.querySelector('.btn-spinner').style.display = 'inline-block';
       submitBtn.querySelector('.btn-text').textContent = 'Scraping…';
-      showStatus(`Scraping ${platform === 'linkedin' ? 'LinkedIn' : 'Reddit'}… This may take a minute.`, 'loading', true);
+      const platformLabel = platform === 'both' ? 'LinkedIn & Reddit' : platform === 'linkedin' ? 'LinkedIn' : 'Reddit';
+      showStatus(`Scraping ${platformLabel}… This may take a minute.`, 'loading', true);
       resultsSection.style.display = 'none';
       emptyState.style.display = 'none';
 
@@ -413,6 +445,7 @@
         if (data.error) {
           showStatus('Error: ' + data.error, 'error');
         } else {
+          lastScrapedPosts = data.posts || [];
           showStatus('Done! Found ' + data.count + ' post' + (data.count !== 1 ? 's' : '') + '.', 'success', true);
           const loader = statusEl.querySelector('.loader');
           if (loader) loader.classList.add('done');
@@ -423,6 +456,7 @@
             : '<p class="empty-state">No posts found. Try different keywords or a broader time filter.</p>';
           resultsSection.style.display = 'block';
           emptyState.style.display = 'none';
+          document.getElementById('export-excel-btn').disabled = !lastScrapedPosts.length;
         }
       } catch (err) {
         showStatus('Request failed: ' + err.message, 'error');
