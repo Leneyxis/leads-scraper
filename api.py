@@ -21,6 +21,10 @@ try:
 except ImportError:
     pass
 
+# Configure logging before scrapers (so [linkedin] / [reddit] show correctly)
+import logging
+logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
+
 from reddit import scrape_reddit
 from linkedin import scrape_linkedin
 

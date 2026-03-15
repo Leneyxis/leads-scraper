@@ -435,13 +435,27 @@
       emptyState.style.display = 'none';
 
       try {
+        const ctrl = new AbortController();
+        const timeout = setTimeout(() => ctrl.abort(), 180000); // 3 min for LinkedIn
         const res = await fetch('/api/scrape', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: ctrl.signal,
         });
-        const data = await res.json();
+        clearTimeout(timeout);
+        const text = await res.text();
+        let data;
+        try {
+          data = text ? JSON.parse(text) : { error: 'Empty response' };
+        } catch (_) {
+          const msg = !res.ok ? `Server error (${res.status})` : 'Invalid response';
+          throw new Error(text ? msg + ': ' + text.slice(0, 100) : msg);
+        }
 
+        if (!res.ok) {
+          throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+        }
         if (data.error) {
           showStatus('Error: ' + data.error, 'error');
         } else {
@@ -459,7 +473,8 @@
           document.getElementById('export-excel-btn').disabled = !lastScrapedPosts.length;
         }
       } catch (err) {
-        showStatus('Request failed: ' + err.message, 'error');
+        const msg = err.name === 'AbortError' ? 'Request timed out (LinkedIn can take 1–2 min)' : err.message;
+        showStatus('Request failed: ' + msg, 'error');
       } finally {
         submitBtn.disabled = false;
         submitBtn.querySelector('.btn-spinner').style.display = 'none';

@@ -23,7 +23,6 @@ from datetime import datetime
 from typing import List, Dict, Any, Set
 from urllib.parse import quote_plus
 
-logging.basicConfig(level=logging.INFO, format="[linkedin] %(message)s")
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -127,8 +126,9 @@ async def _read_listitem(page, item) -> str:
     except Exception:
         return ""
 
+    raw = (raw or "").strip()
     clean_lines = []
-    for line in (raw or "").splitlines():
+    for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -136,7 +136,23 @@ async def _read_listitem(page, item) -> str:
             continue
         clean_lines.append(line)
 
-    return "\n".join(clean_lines)
+    result = "\n".join(clean_lines)
+    # Fallback: if noise filter removed too much but raw has content, use first substantial lines
+    if len(result) < 20 and len(raw) > 40:
+        skip_words = {"like", "comment", "repost", "send", "share", "follow", "promoted", "sponsored"}
+        lines = []
+        for line in raw.splitlines():
+            s = line.strip()
+            if len(s) < 4:
+                continue
+            if s.lower() in skip_words:
+                continue
+            lines.append(s)
+            if len("\n".join(lines)) >= 30:
+                break
+        if lines:
+            result = "\n".join(lines[:6])
+    return result
 
 
 async def _find_post_url(page, item) -> str:
@@ -264,19 +280,26 @@ async def _harvest_posts(
     if len(items) == 0 and os.getenv("LINKEDIN_DEBUG", "").strip() in ("1", "true", "yes"):
         log.warning(f"Debug: current URL = {page.url}")
 
+    MIN_CONTENT_LEN = 15  # Minimum chars to count as valid post (was 30 — too strict)
+    debug = os.getenv("LINKEDIN_DEBUG", "").strip().lower() in ("1", "true", "yes")
     added = 0
-    for item in items:
+
+    for idx, item in enumerate(items):
         if len(results) >= max_quantity:
             break
         try:
             await _expand_listitem(page, item)
 
             content = await _read_listitem(page, item)
-            if not content or len(content) < 30:
+            if not content or len(content) < MIN_CONTENT_LEN:
+                if debug:
+                    log.debug(f"Skip item {idx+1}: content too short ({len(content or '')} chars)")
                 continue
 
             key = hash(content[:400])
             if key in seen:
+                if debug:
+                    log.debug(f"Skip item {idx+1}: duplicate content")
                 continue
             seen.add(key)
 
@@ -287,7 +310,9 @@ async def _harvest_posts(
             added += 1
             log.info(f"Collected post {len(results)}/{max_quantity}")
 
-        except Exception:
+        except Exception as e:
+            if debug:
+                log.debug(f"Skip item {idx+1}: {e}")
             continue
 
     return added
@@ -386,8 +411,10 @@ async def _login_if_needed(page, search_url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _is_headless_env() -> bool:
-    """Force headless when no display (Render, Docker, CI)."""
+    """Force headless when no display (Render, Railway, Docker, CI)."""
     if os.environ.get("RENDER"):
+        return True
+    if os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID"):
         return True
     if os.path.exists("/.dockerenv"):
         return True

@@ -28,8 +28,7 @@ SEARCH_URL       = "https://www.reddit.com/search.json"
 # Reddit search time filters: hour, day, week, month, year, all
 VALID_TIME_FILTERS = ("hour", "day", "week", "month", "year", "all")
 
-logging.basicConfig(level=logging.INFO, format="[reddit] %(message)s")
-log = logging.getLogger("reddit")
+log = logging.getLogger(__name__)
 
 # ── Signal phrases (for quality filtering) ─────────────────────────────────────
 FOR_HIRE_SIGNALS = [
