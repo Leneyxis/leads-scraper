@@ -1,15 +1,19 @@
 """
-LinkedIn post search scraper using Selenium.
+LinkedIn post search scraper using Playwright.
 
-Strategy (v6):
+Strategy (v7):
 - Find ALL [role='listitem'] elements on the page (post containers).
 - Grab all text from each listitem — includes user name and post content.
 - Extract post links from <a> tags within the listitem.
 - Optionally expand [data-testid='expandable-text-button'] inside listitem if present.
 - Scroll-until-stable to load new posts, harvest, then paginate.
 - Stops as soon as max_quantity posts have been collected (no page limit).
+
+Uses Playwright + playwright-stealth for better anti-bot evasion in headless mode.
 """
 
+import asyncio
+import json
 import os
 import re
 import time
@@ -19,18 +23,6 @@ from datetime import datetime
 from typing import List, Dict, Any, Set
 from urllib.parse import quote_plus
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    StaleElementReferenceException,
-    NoSuchElementException,
-    TimeoutException,
-    ElementClickInterceptedException,
-)
-
 logging.basicConfig(level=logging.INFO, format="[linkedin] %(message)s")
 log = logging.getLogger(__name__)
 
@@ -38,7 +30,7 @@ log = logging.getLogger(__name__)
 # Selectors
 # ---------------------------------------------------------------------------
 
-LISTITEM_SELECTOR               = "[role='listitem']"
+LISTITEM_SELECTOR = "[role='listitem']"
 EXPANDABLE_TEXT_BUTTON_SELECTOR = "[data-testid='expandable-text-button']"
 
 LOAD_MORE_SELECTORS = [
@@ -47,14 +39,6 @@ LOAD_MORE_SELECTORS = [
     "button[aria-label*='See more results' i]",
     "div.scaffold-finite-scroll__load-button",
     "span[role='button'][aria-label*='more' i]",
-]
-
-POST_LINK_SELECTORS = [
-    "a[href*='/posts/']",
-    "a[href*='feed/update']",
-    "a[href*='urn:li:share']",
-    "a[href*='urn:li:activity']",
-    "a[href*='urn:li:ugcPost']",
 ]
 
 _NOISE_PATTERNS = [
@@ -73,68 +57,11 @@ _NAME_PATTERN = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Za-z\-]+){1,3})\b")
 
 
 # ---------------------------------------------------------------------------
-# Driver setup
-# ---------------------------------------------------------------------------
-
-def _setup_driver() -> webdriver.Chrome:
-    chrome_options = Options()
-
-    if os.getenv("CHROME_BIN"):
-        chrome_options.binary_location = os.getenv("CHROME_BIN")
-
-    headless = os.getenv("LINKEDIN_HEADLESS", "true").lower() in ("1", "true", "yes")
-
-    if headless:
-        import tempfile
-        profile_dir = tempfile.mkdtemp(prefix="linkedin_chrome_")
-        chrome_options.add_argument("--headless=new")
-    else:
-        profile_dir = os.getenv("CHROME_PROFILE_DIR") or os.path.join(os.getcwd(), "chrome_profile")
-        os.makedirs(profile_dir, exist_ok=True)
-
-    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
-    chrome_options.add_argument("--profile-directory=Default")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--ignore-certificate-errors")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-
-    driver = webdriver.Chrome(options=chrome_options)
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
-    )
-    return driver
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _jitter(lo: float = 0.5, hi: float = 1.5) -> None:
     time.sleep(random.uniform(lo, hi))
-
-
-def _safe_click(driver: webdriver.Chrome, element) -> bool:
-    try:
-        element.click()
-        return True
-    except (ElementClickInterceptedException, StaleElementReferenceException):
-        pass
-    try:
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
-        _jitter(0.2, 0.5)
-        driver.execute_script("arguments[0].click();", element)
-        return True
-    except Exception:
-        return False
 
 
 def _build_search_url(keywords: str) -> str:
@@ -147,29 +74,23 @@ def _parse_content_for_display(content: str) -> tuple[str, str]:
     Returns (username, post_content).
     """
     raw = content.strip()
-    # Strip "Feed post" prefix
     raw = re.sub(r"^Feed post\s*", "", raw, flags=re.IGNORECASE)
 
-    # Extract username: first name-like pattern (e.g. "Mandar Hodage-Patil")
     username = "linkedin"
     name_match = _NAME_PATTERN.search(raw)
     if name_match:
         username = name_match.group(1).strip()
 
-    # Extract post content: split by " • " — the last part is usually the actual post body
-    # (header is: name • headline+time • content)
     parts = [p.strip() for p in raw.split(" • ") if p.strip()]
     post_content = raw
     if len(parts) >= 2:
-        # Filter out header parts: contain "|" (headline), connection degree, or time
         header_indicators = ("|", "1st", "2nd", "3rd", "reactions", "comment", "repost")
         for part in reversed(parts):
             if not any(ind in part for ind in header_indicators) and not re.match(r"^\d+[hHdDwWmMyY]$", part):
-                if len(part) >= 15:  # Skip tiny fragments
+                if len(part) >= 15:
                     post_content = part
                     break
 
-    # Fallback: strip repeated name and connection degree from start
     if post_content == raw and username != "linkedin":
         post_content = re.sub(rf"^{re.escape(username)}\s*\d*(?:st|nd|rd|th)\+?\s*", "", raw, flags=re.IGNORECASE)
         post_content = re.sub(rf"^{re.escape(username)}\s*[•·]\s*", "", post_content)
@@ -179,40 +100,35 @@ def _parse_content_for_display(content: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Core: expand the "…more" button inside a listitem (if present)
+# Core: expand "…more" button, read listitem, find post URL/hashtags
 # ---------------------------------------------------------------------------
 
-def _expand_listitem(driver: webdriver.Chrome, item) -> None:
+async def _expand_listitem(page, item) -> None:
     try:
-        btn = item.find_element(By.CSS_SELECTOR, EXPANDABLE_TEXT_BUTTON_SELECTOR)
-        if btn.is_displayed():
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+        btn = item.locator(EXPANDABLE_TEXT_BUTTON_SELECTOR).first
+        if await btn.is_visible():
+            await btn.scroll_into_view_if_needed()
             _jitter(0.2, 0.4)
-            _safe_click(driver, btn)
+            await btn.click(force=True)
             _jitter(0.8, 1.5)
-    except (NoSuchElementException, StaleElementReferenceException):
-        pass
     except Exception:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Core: read all text from a listitem (user name, post content, etc.)
-# ---------------------------------------------------------------------------
-
-def _read_listitem(driver: webdriver.Chrome, item) -> str:
+async def _read_listitem(page, item) -> str:
     try:
-        raw = driver.execute_script("""
-            const el = arguments[0];
-            const clone = el.cloneNode(true);
-            clone.querySelectorAll('button').forEach(b => b.remove());
-            return clone.innerText || clone.textContent || '';
-        """, item) or ""
+        raw = await item.evaluate("""
+            (el) => {
+                const clone = el.cloneNode(true);
+                clone.querySelectorAll('button').forEach(b => b.remove());
+                return clone.innerText || clone.textContent || '';
+            }
+        """)
     except Exception:
         return ""
 
     clean_lines = []
-    for line in raw.splitlines():
+    for line in (raw or "").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -223,91 +139,62 @@ def _read_listitem(driver: webdriver.Chrome, item) -> str:
     return "\n".join(clean_lines)
 
 
-# ---------------------------------------------------------------------------
-# Core: find post URL and hashtags from within the listitem
-# ---------------------------------------------------------------------------
-
-def _find_post_url(driver: webdriver.Chrome, item) -> str:
-    """
-    Find post link from <a> tags within the listitem (and its descendants).
-    """
-    def _find_in(element) -> str:
-        try:
-            candidates = []
-            for a in element.find_elements(By.TAG_NAME, "a"):
-                href = (a.get_attribute("href") or "").strip()
-                if not href or "login" in href or "linkedin.com" not in href:
-                    continue
-                if any(k in href for k in ("/posts/", "feed/update", "urn:li:share", "urn:li:activity")):
-                    base = href.split("?")[0]
-                    if not any(b.split("?")[0] == base for b in candidates):
-                        candidates.append(href)
-            if candidates:
-                return candidates[0]
-            for a in element.find_elements(By.CSS_SELECTOR, "a[href*='urn:li']"):
-                h = (a.get_attribute("href") or "").strip()
-                if h and "login" not in h:
-                    return h
-        except Exception:
-            pass
-        return ""
-
-    # First try within the listitem itself
-    url = _find_in(item)
-    if url:
-        return url.split("?")[0]
-
-    # Fallback: walk up ancestors
-    current = item
-    for _ in range(10):
-        try:
-            url = _find_in(current)
-            if url:
-                return url.split("?")[0]
-            current = current.find_element(By.XPATH, "..")
-        except Exception:
-            break
+async def _find_post_url(page, item) -> str:
+    try:
+        for sel in ("a[href*='/posts/']", "a[href*='feed/update']", "a[href*='urn:li:share']", "a[href*='urn:li:activity']"):
+            loc = item.locator(sel)
+            if await loc.count() > 0:
+                href = await loc.first.get_attribute("href")
+                if href and "login" not in href and "linkedin.com" in href:
+                    return href.split("?")[0]
+        loc = item.locator("a[href*='urn:li']")
+        if await loc.count() > 0:
+            href = await loc.first.get_attribute("href")
+            if href and "login" not in href:
+                return href.split("?")[0]
+    except Exception:
+        pass
     return ""
 
 
-def _find_hashtags(driver: webdriver.Chrome, item) -> List[str]:
+async def _find_hashtags(page, item) -> List[str]:
     try:
-        return driver.execute_script("""
-            const el = arguments[0];
-            return Array.from(el.querySelectorAll("a[href*='%23'], a[href*='hashtag']"))
+        tags = await item.evaluate("""
+            (el) => Array.from(el.querySelectorAll("a[href*='%23'], a[href*='hashtag']"))
                 .map(a => a.textContent.trim())
-                .filter(t => t.startsWith('#'));
-        """, item) or []
+                .filter(t => t && t.startsWith('#'))
+        """)
+        return tags or []
     except Exception:
         return []
 
 
 # ---------------------------------------------------------------------------
-# Core: scroll until no new listitems appear
+# Core: scroll, load more, harvest
 # ---------------------------------------------------------------------------
 
-def _count_listitems(driver: webdriver.Chrome) -> int:
+async def _count_listitems(page) -> int:
     try:
-        return len(driver.find_elements(By.CSS_SELECTOR, LISTITEM_SELECTOR))
+        return await page.locator(LISTITEM_SELECTOR).count()
     except Exception:
         return 0
 
 
-def _scroll_until_stable(
-    driver: webdriver.Chrome,
+async def _scroll_until_stable(
+    page,
     max_scrolls: int = 60,
     stable_threshold: int = 3,
     scroll_pause: float = 1.8,
 ) -> None:
     stable_count = 0
-    last_count = _count_listitems(driver)
+    last_count = await _count_listitems(page)
 
     for i in range(max_scrolls):
         for _ in range(4):
-            driver.execute_script("window.scrollBy(0, window.innerHeight * 0.8);")
+            await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
             time.sleep(scroll_pause / 4)
 
-        current = _count_listitems(driver)
+        current = await _count_listitems(page)
         log.info(f"Scroll {i+1}: {current} listitem elements found")
 
         if current > last_count:
@@ -322,44 +209,37 @@ def _scroll_until_stable(
         _jitter(0.3, 0.8)
 
 
-# ---------------------------------------------------------------------------
-# Core: click "load more results" pagination
-# ---------------------------------------------------------------------------
-
-def _click_load_more(driver: webdriver.Chrome) -> bool:
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+async def _click_load_more(page) -> bool:
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     _jitter(1.0, 2.0)
 
     for selector in LOAD_MORE_SELECTORS:
         try:
-            for el in driver.find_elements(By.CSS_SELECTOR, selector):
-                try:
-                    if el.is_displayed() and el.is_enabled():
-                        log.info(f"Clicking load-more: {selector}")
-                        if _safe_click(driver, el):
-                            _jitter(2.5, 4.0)
-                            return True
-                except StaleElementReferenceException:
-                    continue
+            loc = page.locator(selector)
+            for i in range(await loc.count()):
+                el = loc.nth(i)
+                if await el.is_visible() and await el.is_enabled():
+                    log.info(f"Clicking load-more: {selector}")
+                    await el.scroll_into_view_if_needed()
+                    _jitter(0.2, 0.5)
+                    await el.click(force=True)
+                    _jitter(2.5, 4.0)
+                    return True
         except Exception:
             continue
 
     try:
-        for btn in driver.find_elements(By.CSS_SELECTOR, "button, [role='button']"):
+        for btn in await page.locator("button, [role='button']").all():
             try:
-                label = (
-                    btn.text
-                    or btn.get_attribute("aria-label")
-                    or btn.get_attribute("title")
-                    or ""
-                ).strip().lower()
+                label = (await btn.text_content() or await btn.get_attribute("aria-label") or await btn.get_attribute("title") or "").strip().lower()
                 if any(k in label for k in ("load more", "see more result", "show more result", "next page")):
-                    if btn.is_displayed() and btn.is_enabled():
+                    if await btn.is_visible() and await btn.is_enabled():
                         log.info(f"Clicking load-more via text: '{label}'")
-                        if _safe_click(driver, btn):
-                            _jitter(2.5, 4.0)
-                            return True
-            except StaleElementReferenceException:
+                        await btn.scroll_into_view_if_needed()
+                        await btn.click(force=True)
+                        _jitter(2.5, 4.0)
+                        return True
+            except Exception:
                 continue
     except Exception:
         pass
@@ -367,39 +247,31 @@ def _click_load_more(driver: webdriver.Chrome) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Core: harvest all listitems currently in DOM (user name, content, links)
-# ---------------------------------------------------------------------------
-
-def _harvest_posts(
-    driver: webdriver.Chrome,
+async def _harvest_posts(
+    page,
     results: List[Dict[str, Any]],
     seen: Set[int],
     max_quantity: int,
 ) -> int:
-    """
-    Find every [role='listitem'] on the page. Grab all text (user name, post content)
-    and extract post links from within each listitem.
-    Stops as soon as results reaches max_quantity.
-    Returns number of new posts added.
-    """
     time.sleep(1.5)
 
     try:
-        items = driver.find_elements(By.CSS_SELECTOR, LISTITEM_SELECTOR)
+        items = await page.locator(LISTITEM_SELECTOR).all()
     except Exception:
         return 0
 
     log.info(f"Found {len(items)} listitem elements")
-    added = 0
+    if len(items) == 0 and os.getenv("LINKEDIN_DEBUG", "").strip() in ("1", "true", "yes"):
+        log.warning(f"Debug: current URL = {page.url}")
 
+    added = 0
     for item in items:
         if len(results) >= max_quantity:
             break
         try:
-            _expand_listitem(driver, item)
+            await _expand_listitem(page, item)
 
-            content = _read_listitem(driver, item)
+            content = await _read_listitem(page, item)
             if not content or len(content) < 30:
                 continue
 
@@ -408,15 +280,13 @@ def _harvest_posts(
                 continue
             seen.add(key)
 
-            post_url = _find_post_url(driver, item)
-            hashtags = _find_hashtags(driver, item)
+            post_url = await _find_post_url(page, item)
+            hashtags = await _find_hashtags(page, item)
 
             results.append({"content": content, "post_url": post_url, "hashtags": hashtags})
             added += 1
             log.info(f"Collected post {len(results)}/{max_quantity}")
 
-        except StaleElementReferenceException:
-            continue
         except Exception:
             continue
 
@@ -424,11 +294,68 @@ def _harvest_posts(
 
 
 # ---------------------------------------------------------------------------
+# Cookies (direct session — easier than email/password)
+# ---------------------------------------------------------------------------
+
+LINKEDIN_DOMAIN = ".linkedin.com"
+
+
+def _parse_cookies_from_env() -> List[Dict[str, Any]]:
+    """
+    Parse cookies from env. Supports:
+    - LINKEDIN_LI_AT: just the li_at session cookie value (simplest)
+    - LINKEDIN_COOKIES: JSON array of {name, value, domain?, path?}
+    """
+    cookies: List[Dict[str, Any]] = []
+
+    # Simple: just li_at value
+    li_at = os.getenv("LINKEDIN_LI_AT", "").strip()
+    if li_at:
+        cookies.append({
+            "name": "li_at",
+            "value": li_at,
+            "domain": LINKEDIN_DOMAIN,
+            "path": "/",
+        })
+
+    # Full: JSON array
+    raw = os.getenv("LINKEDIN_COOKIES", "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                for c in parsed:
+                    if isinstance(c, dict) and c.get("name") and c.get("value"):
+                        c = dict(c)
+                        c.setdefault("domain", LINKEDIN_DOMAIN)
+                        c.setdefault("path", "/")
+                        cookies.append(c)
+        except json.JSONDecodeError:
+            log.warning("LINKEDIN_COOKIES invalid JSON — ignoring")
+
+    return cookies
+
+
+async def _apply_cookies(context, page) -> bool:
+    """Add cookies to context and verify we're logged in. Returns True if cookies were applied."""
+    cookies = _parse_cookies_from_env()
+    if not cookies:
+        return False
+
+    # Playwright requires visiting the domain before add_cookies
+    await page.goto("https://www.linkedin.com", wait_until="domcontentloaded")
+    _jitter(1, 2)
+    await context.add_cookies(cookies)
+    log.info(f"Applied {len(cookies)} cookie(s) from env")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Login
 # ---------------------------------------------------------------------------
 
-def _login_if_needed(driver: webdriver.Chrome, search_url: str) -> bool:
-    url = driver.current_url
+async def _login_if_needed(page, search_url: str) -> bool:
+    url = page.url
     if not any(p in url for p in ("/login", "/uas/", "/checkpoint/", "/authwall", "/signup")):
         return True
 
@@ -439,14 +366,15 @@ def _login_if_needed(driver: webdriver.Chrome, search_url: str) -> bool:
         return False
 
     try:
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "username")))
-        driver.find_element(By.ID, "username").send_keys(email)
-        driver.find_element(By.ID, "password").send_keys(password)
-        driver.find_element(By.ID, "password").submit()
+        await page.wait_for_selector("#username", timeout=10000)
+        await page.fill("#username", email)
+        await page.fill("#password", password)
+        await page.click("#password")
+        await page.keyboard.press("Enter")
         _jitter(4, 6)
-        driver.get(search_url)
+        await page.goto(search_url, wait_until="domcontentloaded")
         _jitter(3, 5)
-        url = driver.current_url
+        url = page.url
         return not any(p in url for p in ("/login", "/uas/", "/checkpoint/", "/authwall"))
     except Exception as e:
         log.error(f"Login failed: {e}")
@@ -454,65 +382,117 @@ def _login_if_needed(driver: webdriver.Chrome, search_url: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Main scrape entry point
+# Main scrape (async)
 # ---------------------------------------------------------------------------
 
-def _scrape_posts_raw(search_url: str, max_quantity: int = 50) -> List[Dict[str, Any]]:
-    """
-    Scrape until max_quantity posts are collected or results are exhausted.
-    Paginates automatically as needed.
-    """
-    driver = _setup_driver()
-    results: List[Dict[str, Any]] = []
-    seen: Set[int] = set()
+async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> List[Dict[str, Any]]:
+    headless = os.getenv("LINKEDIN_HEADLESS", "true").lower() in ("1", "true", "yes")
+
+    playwright = None
+    browser = None
 
     try:
-        driver.get(search_url)
-        _jitter(3, 5)
+        from playwright.async_api import async_playwright
 
-        if not _login_if_needed(driver, search_url):
+        try:
+            from playwright_stealth import Stealth
+            stealth = Stealth()
+            use_stealth = True
+        except ImportError:
+            use_stealth = False
+            log.warning("playwright-stealth not installed; running without stealth (may be detected)")
+
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.launch(
+            headless=headless,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] if headless else [],
+        )
+
+        context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        if use_stealth:
+            await stealth.apply_stealth_async(context)
+        page = await context.new_page()
+
+        results: List[Dict[str, Any]] = []
+        seen: Set[int] = set()
+
+        # Prefer cookies (direct session) over email/password
+        cookies_applied = await _apply_cookies(context, page)
+        if cookies_applied:
+            _jitter(1, 2)
+            await page.goto(search_url, wait_until="domcontentloaded")
+            _jitter(3, 5)
+            # Check if we hit login wall despite cookies (expired, etc.)
+            if any(p in page.url for p in ("/login", "/uas/", "/checkpoint/", "/authwall")):
+                log.warning("Cookies applied but still on login/checkpoint — falling back to email/password")
+                cookies_applied = False
+        if not cookies_applied:
+            await page.goto(search_url, wait_until="domcontentloaded")
+            _jitter(3, 5)
+
+        if not await _login_if_needed(page, search_url):
             return []
 
         try:
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, LISTITEM_SELECTOR))
-            )
+            await page.wait_for_selector(LISTITEM_SELECTOR, timeout=15000)
             log.info("listitem elements detected — starting scrape")
-        except TimeoutException:
+        except Exception:
             log.warning("No listitem found after 15s — page may not have loaded correctly")
+            log.warning(f"Current URL: {page.url}")
             _jitter(5, 8)
 
-        page = 0
+        page_num = 0
         while len(results) < max_quantity:
-            page += 1
-            log.info(f"=== Page {page} | collected {len(results)}/{max_quantity} ===")
+            page_num += 1
+            log.info(f"=== Page {page_num} | collected {len(results)}/{max_quantity} ===")
 
-            _scroll_until_stable(driver)
+            await _scroll_until_stable(page)
             _jitter(1.5, 2.5)
 
-            n = _harvest_posts(driver, results, seen, max_quantity)
+            n = await _harvest_posts(page, results, seen, max_quantity)
             log.info(f"Harvested {n} new posts (total: {len(results)}/{max_quantity})")
 
             if len(results) >= max_quantity:
                 log.info("Reached max_quantity — stopping")
                 break
 
-            if not _click_load_more(driver):
+            if not await _click_load_more(page):
                 log.info("No 'load more' button — reached end of results")
                 break
 
             _jitter(2, 3)
 
+        if len(results) == 0 and os.getenv("LINKEDIN_DEBUG", "").strip() in ("1", "true", "yes"):
+            try:
+                path = os.path.join(os.getcwd(), "linkedin_debug_screenshot.png")
+                await page.screenshot(path=path)
+                log.info(f"Debug: saved screenshot to {path} (0 posts — check for login/auth wall)")
+            except Exception as e:
+                log.warning(f"Debug screenshot failed: {e}")
+
         log.info(f"Scrape complete: {len(results)} posts collected")
         return results
 
     finally:
-        driver.quit()
+        if browser:
+            await browser.close()
+        if playwright:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Public API (sync)
 # ---------------------------------------------------------------------------
+
+def _scrape_posts_raw(search_url: str, max_quantity: int = 50) -> List[Dict[str, Any]]:
+    return asyncio.run(_scrape_posts_raw_async(search_url, max_quantity))
+
 
 def scrape_linkedin_posts(keywords: str, max_quantity: int = 50) -> List[Dict[str, Any]]:
     """Scrape posts by keyword string. Returns raw: content, post_url, hashtags."""

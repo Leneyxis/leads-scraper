@@ -1,16 +1,17 @@
 """
-FastAPI backend for testing Reddit and LinkedIn scrapers.
-Run with: uvicorn api:app --reload
+Scraper API — JSON endpoints for LinkedIn and Reddit.
+Run: uvicorn api:app --reload
+Docs: http://localhost:8000/docs
 """
 import os
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from io import BytesIO
 
 # Load .env before importing scrapers
@@ -23,33 +24,70 @@ except ImportError:
 from reddit import scrape_reddit
 from linkedin import scrape_linkedin
 
-app = FastAPI(title="Scraper Test API")
+app = FastAPI(
+    title="LinkedIn & Reddit Scraper API",
+    description="Scrape hiring posts from LinkedIn and Reddit. Returns JSON.",
+    version="1.0.0",
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-class ScrapeRequest(BaseModel):
-    platform: str = "reddit"  # reddit | linkedin | both
-    keywords: List[str]
-    quantity: int = 50
-    time_filter: str = "day"  # Reddit: hour, day, week, month, year, all
-    since_hours: int = 24     # LinkedIn: 24, 168, 720 (past-24h, past-week, past-month)
+# ---------------------------------------------------------------------------
+# Response models (consistent JSON schema)
+# ---------------------------------------------------------------------------
+
+class Post(BaseModel):
+    """Unified post schema for both platforms."""
+    platform: str = Field(..., description="linkedin | reddit")
+    username: str = Field(..., description="Author username")
+    post_url: str = Field(..., description="URL to the post")
+    post_content: str = Field(..., description="Post body/text")
+    scraped_at: str = Field(..., description="ISO timestamp")
+    title: Optional[str] = Field(None, description="Post title (Reddit)")
+    subreddit: Optional[str] = Field(None, description="Subreddit (Reddit)")
+    created_utc: Optional[Any] = Field(None, description="Reddit created_utc")
 
 
 class ScrapeResponse(BaseModel):
-    posts: list
-    count: int
-    error: Optional[str] = None
+    """Standard JSON response for scrape endpoints."""
+    success: bool = Field(..., description="Whether the scrape completed without error")
+    platform: str = Field(..., description="linkedin | reddit | both")
+    count: int = Field(..., description="Number of posts returned")
+    posts: List[Post] = Field(default_factory=list, description="List of posts")
+    error: Optional[str] = Field(None, description="Error message if success=False")
+
+
+class ScrapeRequest(BaseModel):
+    """Request body for POST /api/scrape."""
+    platform: str = Field("both", description="reddit | linkedin | both")
+    keywords: List[str] = Field(..., min_length=1, description="Search keywords")
+    quantity: int = Field(50, ge=1, le=200, description="Max posts to fetch")
+    time_filter: str = Field("day", description="Reddit: hour, day, week, month, year, all")
+    since_hours: int = Field(24, description="LinkedIn time window (24, 168, 720)")
 
 
 class ExportExcelRequest(BaseModel):
-    posts: list
+    posts: List[dict]
+
+
+def _to_post(p: dict) -> Post:
+    """Normalize scraper output to Post model."""
+    return Post(
+        platform=p.get("platform", ""),
+        username=p.get("username", ""),
+        post_url=p.get("post_url", ""),
+        post_content=p.get("post_content", ""),
+        scraped_at=p.get("scraped_at", ""),
+        title=p.get("title"),
+        subreddit=p.get("subreddit"),
+        created_utc=p.get("created_utc"),
+    )
 
 
 def _normalize_for_excel(posts: list) -> list:
-    """Normalize posts to a unified schema for Excel."""
     rows = []
     for p in posts:
-        row = {
+        rows.append({
             "platform": p.get("platform", ""),
             "username": p.get("username", ""),
             "post_url": p.get("post_url", ""),
@@ -58,13 +96,11 @@ def _normalize_for_excel(posts: list) -> list:
             "title": p.get("title", ""),
             "subreddit": p.get("subreddit", ""),
             "created_utc": p.get("created_utc", ""),
-        }
-        rows.append(row)
+        })
     return rows
 
 
 def _build_excel_bytes(posts: list) -> bytes:
-    """Build Excel file from posts and return as bytes."""
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
 
@@ -72,44 +108,110 @@ def _build_excel_bytes(posts: list) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Posts"
-
     headers = ["platform", "username", "post_url", "post_content", "scraped_at", "title", "subreddit", "created_utc"]
     for col, h in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=h)
-
     for row_idx, row_data in enumerate(rows, 2):
         for col_idx, key in enumerate(headers, 1):
-            val = row_data.get(key, "")
-            if val is None:
-                val = ""
+            val = row_data.get(key, "") or ""
             ws.cell(row=row_idx, column=col_idx, value=str(val))
-
-    for col_idx, key in enumerate(headers, 1):
-        max_len = len(key)
-        for row_data in rows:
-            val = row_data.get(key, "")
-            max_len = min(max(max_len, len(str(val))), 80)
-        ws.column_dimensions[get_column_letter(col_idx)].width = max_len + 2
-
+    for col_idx in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 20
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-@app.post("/api/scrape", response_model=ScrapeResponse)
-def run_scrape(req: ScrapeRequest) -> ScrapeResponse:
-    """Run Reddit and/or LinkedIn scraper with given parameters."""
-    if not req.keywords:
-        raise HTTPException(status_code=400, detail="At least one keyword is required")
-    platform = (req.platform or "reddit").lower()
-    if platform not in ("reddit", "linkedin", "both"):
-        raise HTTPException(status_code=400, detail="Platform must be reddit, linkedin, or both")
+def _linkedin_configured() -> bool:
+    return bool(
+        os.getenv("LINKEDIN_LI_AT", "").strip()
+        or os.getenv("LINKEDIN_COOKIES", "").strip()
+        or (os.getenv("LINKEDIN_EMAIL", "").strip() and os.getenv("LINKEDIN_PASSWORD", "").strip())
+    )
 
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api")
+def api_info():
+    """API info and available endpoints."""
+    return {
+        "name": "LinkedIn & Reddit Scraper API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "endpoints": {
+            "GET /api/linkedin": "Scrape LinkedIn (query: keywords, quantity)",
+            "GET /api/reddit": "Scrape Reddit (query: keywords, quantity, time_filter)",
+            "POST /api/scrape": "Scrape one or both (body: platform, keywords, quantity)",
+            "GET /api/health": "Health check",
+        },
+    }
+
+
+@app.get("/api/linkedin", response_model=ScrapeResponse)
+def get_linkedin(
+    keywords: str = Query(..., description="Search keywords (space-separated)"),
+    quantity: int = Query(50, ge=1, le=200, description="Max posts"),
+) -> ScrapeResponse:
+    """Scrape LinkedIn posts. Returns JSON."""
+    kw_list = [k.strip() for k in keywords.split() if k.strip()]
+    if not kw_list:
+        raise HTTPException(status_code=400, detail="keywords is required")
     try:
-        all_posts = []
-        platforms_to_run = ["linkedin", "reddit"] if platform == "both" else [platform]
+        posts = scrape_linkedin(keywords=kw_list, quantity=quantity)
+        return ScrapeResponse(
+            success=True,
+            platform="linkedin",
+            count=len(posts),
+            posts=[_to_post(p) for p in posts],
+        )
+    except Exception as e:
+        return ScrapeResponse(
+            success=False,
+            platform="linkedin",
+            count=0,
+            posts=[],
+            error=str(e),
+        )
 
-        for p in platforms_to_run:
+
+@app.get("/api/reddit", response_model=ScrapeResponse)
+def get_reddit(
+    keywords: str = Query(..., description="Search keywords (space-separated)"),
+    quantity: int = Query(50, ge=1, le=200, description="Max posts"),
+    time_filter: str = Query("day", description="hour, day, week, month, year, all"),
+) -> ScrapeResponse:
+    """Scrape Reddit [Hiring] posts. Returns JSON."""
+    kw_list = [k.strip() for k in keywords.split() if k.strip()]
+    if not kw_list:
+        raise HTTPException(status_code=400, detail="keywords is required")
+    try:
+        posts = scrape_reddit(keywords=kw_list, quantity=quantity, time_filter=time_filter)
+        return ScrapeResponse(
+            success=True,
+            platform="reddit",
+            count=len(posts),
+            posts=[_to_post(p) for p in posts],
+        )
+    except Exception as e:
+        return ScrapeResponse(
+            success=False,
+            platform="reddit",
+            count=0,
+            posts=[],
+            error=str(e),
+        )
+
+
+@app.post("/api/scrape", response_model=ScrapeResponse)
+def post_scrape(req: ScrapeRequest) -> ScrapeResponse:
+    """Scrape LinkedIn and/or Reddit. Returns JSON."""
+    platforms = ["linkedin", "reddit"] if req.platform == "both" else [req.platform]
+    all_posts = []
+    try:
+        for p in platforms:
             if p == "reddit":
                 posts = scrape_reddit(
                     keywords=req.keywords,
@@ -123,10 +225,20 @@ def run_scrape(req: ScrapeRequest) -> ScrapeResponse:
                     since_hours=req.since_hours,
                 )
             all_posts.extend(posts)
-
-        return ScrapeResponse(posts=all_posts, count=len(all_posts))
+        return ScrapeResponse(
+            success=True,
+            platform=req.platform,
+            count=len(all_posts),
+            posts=[_to_post(p) for p in all_posts],
+        )
     except Exception as e:
-        return ScrapeResponse(posts=[], count=0, error=str(e))
+        return ScrapeResponse(
+            success=False,
+            platform=req.platform,
+            count=0,
+            posts=[],
+            error=str(e),
+        )
 
 
 @app.post("/api/export-excel")
@@ -147,15 +259,15 @@ def export_excel(req: ExportExcelRequest):
 
 @app.get("/api/health")
 def health():
-    """Health check."""
+    """Health check and configuration status."""
     return {
         "status": "ok",
         "reddit_configured": bool(os.getenv("REDDIT_CLIENT_ID", "").strip()),
-        "linkedin_configured": bool(os.getenv("LINKEDIN_EMAIL", "").strip() and os.getenv("LINKEDIN_PASSWORD", "").strip()),
+        "linkedin_configured": _linkedin_configured(),
     }
 
 
-# Serve frontend (API routes above take precedence)
+# Serve frontend if present
 frontend_path = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.exists(frontend_path):
     app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")

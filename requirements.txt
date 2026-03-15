@@ -1,4 +1,5 @@
-selenium
+playwright>=1.40.0
+playwright-stealth>=2.0.0
 praw
 python-dotenv
 fastapi
