@@ -385,8 +385,21 @@ async def _login_if_needed(page, search_url: str) -> bool:
 # Main scrape (async)
 # ---------------------------------------------------------------------------
 
+def _is_headless_env() -> bool:
+    """Force headless when no display (Render, Docker, CI)."""
+    if os.environ.get("RENDER"):
+        return True
+    if os.path.exists("/.dockerenv"):
+        return True
+    if not os.environ.get("DISPLAY") and os.name != "nt":
+        return True
+    return False
+
+
 async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> List[Dict[str, Any]]:
     headless = os.getenv("LINKEDIN_HEADLESS", "true").lower() in ("1", "true", "yes")
+    if _is_headless_env():
+        headless = True  # Render/Docker: no X server, must use headless
 
     playwright = None
     browser = None
