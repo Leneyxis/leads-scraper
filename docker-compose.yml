@@ -1,0 +1,22 @@
+# Scraper API — for Docker/Portainer deployment
+# Usage: docker compose up -d
+# Ensure .env exists with credentials (see .env.example)
+services:
+  scraper:
+    build: .
+    container_name: scraper-api
+    restart: unless-stopped
+    ports:
+      - "10000:10000"
+    environment:
+      - PORT=10000
+      # Pass through from .env file (or set in Portainer)
+      - LINKEDIN_LI_AT=${LINKEDIN_LI_AT}
+      - LINKEDIN_EMAIL=${LINKEDIN_EMAIL}
+      - LINKEDIN_PASSWORD=${LINKEDIN_PASSWORD}
+      - LINKEDIN_HEADLESS=${LINKEDIN_HEADLESS:-true}
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - REDDIT_RATE_LIMIT_DELAY=${REDDIT_RATE_LIMIT_DELAY:-2.5}
