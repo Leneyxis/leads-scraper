@@ -102,6 +102,12 @@ def _parse_content_for_display(content: str) -> tuple[str, str]:
 # Core: expand "…more" button, read listitem, find post URL/hashtags
 # ---------------------------------------------------------------------------
 
+def _is_context_destroyed(e: Exception) -> bool:
+    """Check if error is due to execution context destroyed (page navigated)."""
+    msg = str(e).lower()
+    return "execution context was destroyed" in msg or "target closed" in msg
+
+
 async def _expand_listitem(page, item) -> None:
     try:
         btn = item.locator(EXPANDABLE_TEXT_BUTTON_SELECTOR).first
@@ -123,7 +129,9 @@ async def _read_listitem(page, item) -> str:
                 return clone.innerText || clone.textContent || '';
             }
         """)
-    except Exception:
+    except Exception as e:
+        if _is_context_destroyed(e):
+            raise
         return ""
 
     raw = (raw or "").strip()
@@ -206,23 +214,29 @@ async def _scroll_until_stable(
     last_count = await _count_listitems(page)
 
     for i in range(max_scrolls):
-        for _ in range(4):
-            await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
-            time.sleep(scroll_pause / 4)
+        try:
+            for _ in range(4):
+                await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
+                time.sleep(scroll_pause / 4)
 
-        current = await _count_listitems(page)
-        log.info(f"Scroll {i+1}: {current} listitem elements found")
+            current = await _count_listitems(page)
+            log.info(f"Scroll {i+1}: {current} listitem elements found")
 
-        if current > last_count:
-            last_count = current
-            stable_count = 0
-        else:
-            stable_count += 1
-            if stable_count >= stable_threshold:
-                log.info("Listitem count stable — stopping scroll")
-                break
+            if current > last_count:
+                last_count = current
+                stable_count = 0
+            else:
+                stable_count += 1
+                if stable_count >= stable_threshold:
+                    log.info("Listitem count stable — stopping scroll")
+                    break
 
-        _jitter(0.3, 0.8)
+            _jitter(0.3, 0.8)
+        except Exception as e:
+            if _is_context_destroyed(e):
+                log.warning("Page navigated during scroll — stopping")
+                raise
+            raise
 
 
 async def _click_load_more(page) -> bool:
@@ -320,6 +334,8 @@ async def _harvest_posts(
             log.info(f"Collected post {len(results)}/{max_quantity}")
 
         except Exception as e:
+            if _is_context_destroyed(e):
+                raise
             if debug:
                 log.debug(f"Skip item {idx+1}: {e}")
             continue
@@ -472,15 +488,21 @@ async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> Li
         cookies_applied = await _apply_cookies(context, page)
         if cookies_applied:
             _jitter(1, 2)
-            await page.goto(search_url, wait_until="domcontentloaded")
+            await page.goto(search_url, wait_until="load", timeout=30000)
             _jitter(3, 5)
             # Check if we hit login wall despite cookies (expired, etc.)
             if any(p in page.url for p in ("/login", "/uas/", "/checkpoint/", "/authwall")):
                 log.warning("Cookies applied but still on login/checkpoint — falling back to email/password")
                 cookies_applied = False
         if not cookies_applied:
-            await page.goto(search_url, wait_until="domcontentloaded")
+            await page.goto(search_url, wait_until="load", timeout=30000)
             _jitter(3, 5)
+
+        # Wait for page to settle (reduces "Execution context was destroyed" from mid-navigation)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
 
         if not await _login_if_needed(page, search_url):
             return []
@@ -496,33 +518,39 @@ async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> Li
         page_num = 0
         rounds_without_new = 0
         while len(results) < max_quantity:
-            page_num += 1
-            log.info(f"=== Page {page_num} | collected {len(results)}/{max_quantity} ===")
+            try:
+                page_num += 1
+                log.info(f"=== Page {page_num} | collected {len(results)}/{max_quantity} ===")
 
-            await _scroll_until_stable(page)
-            _jitter(1.5, 2.5)
+                await _scroll_until_stable(page)
+                _jitter(1.5, 2.5)
 
-            n = await _harvest_posts(page, results, seen, max_quantity)
-            log.info(f"Harvested {n} new posts (total: {len(results)}/{max_quantity})")
+                n = await _harvest_posts(page, results, seen, max_quantity)
+                log.info(f"Harvested {n} new posts (total: {len(results)}/{max_quantity})")
 
-            if len(results) >= max_quantity:
-                log.info("Reached max_quantity — stopping")
-                break
-
-            if await _click_load_more(page):
-                _jitter(2, 3)
-                continue
-
-            # No load more button — keep scrolling to trigger infinite scroll
-            if n == 0:
-                rounds_without_new += 1
-                if rounds_without_new >= 2:
-                    log.info("No new posts after 2 scroll rounds — reached end of results")
+                if len(results) >= max_quantity:
+                    log.info("Reached max_quantity — stopping")
                     break
 
-            log.info("No 'load more' button — scrolling more to load additional posts")
-            await _scroll_more(page, num_scrolls=15, pause=1.2)
-            _jitter(2, 3)
+                if await _click_load_more(page):
+                    _jitter(2, 3)
+                    continue
+
+                # No load more button — keep scrolling to trigger infinite scroll
+                if n == 0:
+                    rounds_without_new += 1
+                    if rounds_without_new >= 2:
+                        log.info("No new posts after 2 scroll rounds — reached end of results")
+                        break
+
+                log.info("No 'load more' button — scrolling more to load additional posts")
+                await _scroll_more(page, num_scrolls=15, pause=1.2)
+                _jitter(2, 3)
+            except Exception as e:
+                if _is_context_destroyed(e):
+                    log.warning("Page navigated during scrape — returning %d posts collected so far", len(results))
+                    break
+                raise
 
         if len(results) == 0 and os.getenv("LINKEDIN_DEBUG", "").strip() in ("1", "true", "yes"):
             try:
