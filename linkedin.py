@@ -263,6 +263,15 @@ async def _click_load_more(page) -> bool:
     return False
 
 
+async def _scroll_more(page, num_scrolls: int = 15, pause: float = 1.2) -> None:
+    """Scroll down to trigger infinite scroll loading (no stable check)."""
+    for i in range(num_scrolls):
+        await page.evaluate("window.scrollBy(0, window.innerHeight * 0.9)")
+        time.sleep(pause)
+        _jitter(0.2, 0.5)
+    log.info(f"Scrolled {num_scrolls} more times to load additional posts")
+
+
 async def _harvest_posts(
     page,
     results: List[Dict[str, Any]],
@@ -485,6 +494,7 @@ async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> Li
             _jitter(5, 8)
 
         page_num = 0
+        rounds_without_new = 0
         while len(results) < max_quantity:
             page_num += 1
             log.info(f"=== Page {page_num} | collected {len(results)}/{max_quantity} ===")
@@ -499,10 +509,19 @@ async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> Li
                 log.info("Reached max_quantity — stopping")
                 break
 
-            if not await _click_load_more(page):
-                log.info("No 'load more' button — reached end of results")
-                break
+            if await _click_load_more(page):
+                _jitter(2, 3)
+                continue
 
+            # No load more button — keep scrolling to trigger infinite scroll
+            if n == 0:
+                rounds_without_new += 1
+                if rounds_without_new >= 2:
+                    log.info("No new posts after 2 scroll rounds — reached end of results")
+                    break
+
+            log.info("No 'load more' button — scrolling more to load additional posts")
+            await _scroll_more(page, num_scrolls=15, pause=1.2)
             _jitter(2, 3)
 
         if len(results) == 0 and os.getenv("LINKEDIN_DEBUG", "").strip() in ("1", "true", "yes"):
