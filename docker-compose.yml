@@ -1,15 +1,20 @@
 # Scraper API — for Docker/Portainer deployment
 # Usage: docker compose up -d
 # Ensure .env exists with credentials (see .env.example)
+# For Cloudflare Tunnel: set CLOUDFLARE_TUNNEL_TOKEN in .env
+networks:
+  cft-network:
+    external: true
+
 services:
   scraper:
     build: .
     container_name: scraper-api
     restart: unless-stopped
     ports:
-      - "10000:10000"
+      - "3000:3000"
     environment:
-      - PORT=10000
+      - PORT=3000
       # Pass through from .env file (or set in Portainer)
       - LINKEDIN_LI_AT=${LINKEDIN_LI_AT}
       - LINKEDIN_EMAIL=${LINKEDIN_EMAIL}
@@ -20,3 +25,15 @@ services:
       - REDDIT_USERNAME=${REDDIT_USERNAME}
       - REDDIT_PASSWORD=${REDDIT_PASSWORD}
       - REDDIT_RATE_LIMIT_DELAY=${REDDIT_RATE_LIMIT_DELAY:-2.5}
+    networks:
+      - cft-network
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - cft-network
+    restart: unless-stopped

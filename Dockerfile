@@ -11,6 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY . .
 
 # Railway/Render set PORT env var at runtime
-EXPOSE 10000
+EXPOSE 3000
 
-CMD uvicorn api:app --host 0.0.0.0 --port ${PORT:-10000}
+CMD uvicorn api:app --host 0.0.0.0 --port ${PORT:-3000}

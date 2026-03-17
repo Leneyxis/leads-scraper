@@ -20,8 +20,8 @@ import time
 import random
 import logging
 from datetime import datetime
-from typing import List, Dict, Any, Set
-from urllib.parse import quote_plus
+from typing import List, Dict, Any, Set, Optional
+from urllib.parse import quote_plus, urlparse
 
 log = logging.getLogger(__name__)
 
@@ -435,6 +435,21 @@ async def _login_if_needed(page, search_url: str) -> bool:
 # Main scrape (async)
 # ---------------------------------------------------------------------------
 
+def _parse_proxy() -> Optional[Dict[str, str]]:
+    """Parse LINKEDIN_PROXY env. Format: http://host:port or http://user:pass@host:port"""
+    raw = os.getenv("LINKEDIN_PROXY", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+        server = f"{parsed.scheme or 'http'}://{parsed.hostname}:{parsed.port or 80}"
+        if parsed.username and parsed.password:
+            return {"server": server, "username": parsed.username, "password": parsed.password}
+        return {"server": server}
+    except Exception:
+        return None
+
+
 def _is_headless_env() -> bool:
     """Force headless when no display (Render, Railway, Docker, CI)."""
     if os.environ.get("RENDER"):
@@ -473,10 +488,18 @@ async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> Li
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] if headless else [],
         )
 
-        context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        )
+        proxy = _parse_proxy()
+        if proxy:
+            log.info("Using proxy for LinkedIn")
+
+        context_options: Dict[str, Any] = {
+            "viewport": {"width": 1920, "height": 1080},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        }
+        if proxy:
+            context_options["proxy"] = proxy
+
+        context = await browser.new_context(**context_options)
         if use_stealth:
             await stealth.apply_stealth_async(context)
         page = await context.new_page()
@@ -488,7 +511,21 @@ async def _scrape_posts_raw_async(search_url: str, max_quantity: int = 50) -> Li
         cookies_applied = await _apply_cookies(context, page)
         if cookies_applied:
             _jitter(1, 2)
-            await page.goto(search_url, wait_until="load", timeout=30000)
+            # Warm up session: visit feed first to avoid ERR_TOO_MANY_REDIRECTS on search
+            try:
+                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
+                _jitter(2, 4)
+            except Exception as e:
+                log.warning("Feed warm-up failed: %s — continuing to search", e)
+            # Now navigate to search
+            try:
+                await page.goto(search_url, wait_until="load", timeout=30000)
+            except Exception as e:
+                if "ERR_TOO_MANY_REDIRECTS" in str(e):
+                    log.warning("Search URL redirect loop — trying with domcontentloaded")
+                    await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+                else:
+                    raise
             _jitter(3, 5)
             # Check if we hit login wall despite cookies (expired, etc.)
             if any(p in page.url for p in ("/login", "/uas/", "/checkpoint/", "/authwall")):
