@@ -32,8 +32,6 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
     command: tunnel run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     networks:
       - cft-network
     restart: unless-stopped
