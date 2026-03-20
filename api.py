@@ -9,8 +9,7 @@ from typing import Any, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from io import BytesIO
 
@@ -271,7 +270,12 @@ def health():
     }
 
 
-# Serve frontend if present
+# Serve frontend (do NOT mount StaticFiles at "/" — POST /api/* can hit that mount and
+# StaticFiles only allows GET/HEAD → 405 Method Not Allowed behind some proxies/tunnels).
 frontend_path = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.exists(frontend_path):
-    app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")
+    _index_html = os.path.join(frontend_path, "index.html")
+
+    @app.get("/")
+    def serve_index():
+        return FileResponse(_index_html)

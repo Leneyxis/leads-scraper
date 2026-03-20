@@ -12,7 +12,17 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-import requests
+try:
+    from curl_cffi import requests as http_requests
+    _HTTP = http_requests
+    _CURL_CFFI = True
+except ImportError:
+    import requests as http_requests
+    _HTTP = http_requests
+    _CURL_CFFI = False
+
+# Chrome TLS fingerprint (Reddit often 403s plain urllib3/requests from VPS)
+_TLS_IMPERSONATE = os.getenv("REDDIT_TLS_IMPERSONATE", "chrome124").strip()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 RATE_LIMIT_DELAY = float(os.getenv("REDDIT_RATE_LIMIT_DELAY", "2.0"))  # seconds between pages
@@ -22,6 +32,9 @@ USER_AGENT       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 BACKOFF_BASE     = 10   # seconds — initial wait on 429 / 5xx
 BACKOFF_MAX      = 180  # seconds — ceiling
 BACKOFF_RETRIES  = 8
+# Reddit often blocks datacenter IPs; use REDDIT_PROXY if you see connect timeouts
+CONNECT_TIMEOUT  = float(os.getenv("REDDIT_CONNECT_TIMEOUT", "20"))
+READ_TIMEOUT     = float(os.getenv("REDDIT_READ_TIMEOUT", "60"))
 
 SEARCH_URL       = "https://www.reddit.com/search.json"
 
@@ -92,11 +105,23 @@ class _Session:
     def __init__(self, proxies: List[str]):
         self._proxies = proxies
         self._idx     = 0
-        self._sess    = requests.Session()
+        self._sess    = _HTTP.Session()
         self._sess.headers.update({
-            "User-Agent": USER_AGENT,
-            "Accept":     "application/json",
+            "User-Agent":      USER_AGENT,
+            "Accept":          "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer":         "https://www.reddit.com/search/?q=%5BHiring%5D&type=posts",
+            "Sec-Fetch-Dest":  "empty",
+            "Sec-Fetch-Mode":  "cors",
+            "Sec-Fetch-Site":  "same-origin",
         })
+        if _CURL_CFFI and _TLS_IMPERSONATE:
+            log.info(f"Reddit HTTP: curl_cffi TLS impersonate={_TLS_IMPERSONATE!r}")
+        elif not _CURL_CFFI:
+            log.warning(
+                "curl-cffi not installed — Reddit may 403 from VPS; "
+                "pip install curl-cffi or set REDDIT_PROXY"
+            )
 
     def _next_proxy(self) -> Optional[Dict[str, str]]:
         if not self._proxies:
@@ -112,12 +137,41 @@ class _Session:
 
         for attempt in range(BACKOFF_RETRIES):
             try:
-                resp = self._sess.get(SEARCH_URL, params=p, proxies=proxy, timeout=20)
+                req_kw: Dict[str, Any] = {
+                    "params": p,
+                    "proxies": proxy,
+                    "timeout": (CONNECT_TIMEOUT, READ_TIMEOUT),
+                }
+                if _CURL_CFFI and _TLS_IMPERSONATE:
+                    req_kw["impersonate"] = _TLS_IMPERSONATE
 
-                if resp.status_code == 200:
+                resp = self._sess.get(SEARCH_URL, **req_kw)
+                try:
+                    code = int(resp.status_code)
+                except (TypeError, ValueError):
+                    code = 0
+
+                if code == 200:
                     return resp.json()
 
-                if resp.status_code == 429:
+                if code == 403:
+                    wait = min(delay + random.uniform(0, 2), BACKOFF_MAX)
+                    hint = ""
+                    if not self._proxies:
+                        hint = (
+                            " — install curl-cffi + rebuild image, or set REDDIT_PROXY "
+                            "(residential proxy) if this persists"
+                        )
+                    log.warning(
+                        f"403 Forbidden from Reddit (datacenter/WAF){hint} — "
+                        f"waiting {wait:.1f}s, rotating proxy if any"
+                    )
+                    time.sleep(wait)
+                    delay = min(delay * 2, BACKOFF_MAX)
+                    proxy = self._next_proxy()
+                    continue
+
+                if code == 429:
                     wait = min(
                         float(resp.headers.get("Retry-After", delay)) + random.uniform(0, 3),
                         BACKOFF_MAX,
@@ -128,23 +182,31 @@ class _Session:
                     proxy = self._next_proxy()   # rotate IP on retry
                     continue
 
-                if resp.status_code in (500, 502, 503, 504):
+                if code in (500, 502, 503, 504):
                     wait = min(delay + random.uniform(0, 2), BACKOFF_MAX)
-                    log.warning(f"HTTP {resp.status_code} — waiting {wait:.1f}s")
+                    log.warning(f"HTTP {code} — waiting {wait:.1f}s")
                     time.sleep(wait)
                     delay = min(delay * 2, BACKOFF_MAX)
                     continue
 
-                log.warning(f"HTTP {resp.status_code} — stopping pagination")
+                log.warning(f"HTTP {code or resp.status_code} — stopping pagination")
                 return None
 
-            except requests.RequestException as e:
+            except Exception as e:
                 wait = min(delay + random.uniform(0, 2), BACKOFF_MAX)
-                log.warning(f"Request error: {e} — waiting {wait:.1f}s")
+                hint = ""
+                if not self._proxies and (
+                    "timeout" in str(e).lower() or "Timeout" in type(e).__name__
+                ):
+                    hint = " (Reddit often blocks datacenter IPs — set REDDIT_PROXY or REDDIT_PROXY_LIST)"
+                log.warning(f"Request error: {e}{hint} — waiting {wait:.1f}s")
                 time.sleep(wait)
                 delay = min(delay * 2, BACKOFF_MAX)
 
-        log.error(f"Gave up after {BACKOFF_RETRIES} retries")
+        log.error(
+            f"Gave up after {BACKOFF_RETRIES} retries — "
+            "if Reddit was 403, set REDDIT_PROXY (residential) or upgrade image (curl-cffi TLS)"
+        )
         return None
 
     def sleep(self):
